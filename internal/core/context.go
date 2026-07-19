@@ -48,6 +48,7 @@ type RepoContext struct {
 	NewestCodeMod time.Time
 
 	byPath  map[string]*FileInfo
+	byBase  map[string][]*FileInfo
 	byLang  map[detect.Language][]*FileInfo
 	dirs    map[string][]*FileInfo
 	mu      sync.Mutex
@@ -65,6 +66,7 @@ func NewRepoContext(root string, files []FileInfo, cfg *config.Config) *RepoCont
 		LangStats: map[detect.Language]LangStat{},
 		Config:    cfg,
 		byPath:    make(map[string]*FileInfo, len(files)),
+		byBase:    map[string][]*FileInfo{},
 		byLang:    map[detect.Language][]*FileInfo{},
 		dirs:      map[string][]*FileInfo{},
 		content:   map[string][]byte{},
@@ -72,6 +74,7 @@ func NewRepoContext(root string, files []FileInfo, cfg *config.Config) *RepoCont
 	for i := range c.Files {
 		f := &c.Files[i]
 		c.byPath[f.Path] = f
+		c.byBase[path.Base(f.Path)] = append(c.byBase[path.Base(f.Path)], f)
 		c.byLang[f.Lang] = append(c.byLang[f.Lang], f)
 		c.dirs[path.Dir(f.Path)] = append(c.dirs[path.Dir(f.Path)], f)
 
@@ -104,6 +107,39 @@ func (c *RepoContext) HasAny(rels ...string) (string, bool) {
 	for _, r := range rels {
 		if c.Has(r) {
 			return r, true
+		}
+	}
+	return "", false
+}
+
+// MaxConfigDepth is how deep FindConfig looks for tool configuration. Depth 0
+// is the repo root; depth 2 covers the usual monorepo shapes
+// (frontend/package.json, packages/web/tsconfig.json).
+const MaxConfigDepth = 2
+
+// FindConfig locates a configuration file by basename, preferring the repo
+// root and then shallow subdirectories. A monorepo that keeps package.json in
+// frontend/ and requirements.txt in backend/ has a feedback loop; only looking
+// at the root would report it as having none.
+//
+// Names are tried in caller order (their preference); within one name the
+// shallowest path wins, ties broken lexicographically, so the result is
+// deterministic.
+func (c *RepoContext) FindConfig(names ...string) (string, bool) {
+	for _, name := range names {
+		best := ""
+		bestDepth := MaxConfigDepth + 1
+		for _, f := range c.byBase[name] {
+			d := strings.Count(f.Path, "/")
+			if d > MaxConfigDepth {
+				continue
+			}
+			if d < bestDepth || (d == bestDepth && f.Path < best) {
+				best, bestDepth = f.Path, d
+			}
+		}
+		if best != "" {
+			return best, true
 		}
 	}
 	return "", false

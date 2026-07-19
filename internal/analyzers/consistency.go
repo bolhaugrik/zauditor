@@ -27,7 +27,29 @@ func (a *consistencyAnalyzer) Description() string {
 var (
 	snakeRE = regexp.MustCompile(`^[a-z0-9]+(_[a-z0-9]+)+$`)
 	camelRE = regexp.MustCompile(`^[a-z0-9]+([A-Z][a-z0-9]*)+$`)
+	// *.config.js / *.config.ts and friends: build tooling, not application code.
+	// A prefix is required: vite.config.ts is tooling, src/config.ts is code.
+	toolConfigRE = regexp.MustCompile(`\.config\.(js|cjs|mjs|ts|mts|cts)$`)
 )
+
+// isToolConfigFile reports whether a file is build/tool configuration rather
+// than application code. These files follow the conventions of the tool that
+// reads them, not of the codebase, so counting them as part of a layer
+// produces false drift signals.
+func isToolConfigFile(p string) bool {
+	base := path.Base(p)
+	if strings.HasPrefix(base, ".") {
+		return true // .eslintrc.js, .prettierrc.js, …
+	}
+	if toolConfigRE.MatchString(base) {
+		return true
+	}
+	switch base {
+	case "gulpfile.js", "Gruntfile.js", "webpack.mix.js", "karma.conf.js", "protractor.conf.js":
+		return true
+	}
+	return false
+}
 
 func (a *consistencyAnalyzer) Analyze(ctx *core.RepoContext) core.DimensionResult {
 	src := ctx.SourceFiles()
@@ -45,6 +67,11 @@ func (a *consistencyAnalyzer) Analyze(ctx *core.RepoContext) core.DimensionResul
 	for _, dir := range ctx.Dirs() {
 		var ts, js int
 		for _, f := range ctx.DirFiles(dir) {
+			// Build tooling is expected to be .js even in a strict TS project
+			// (vite.config.ts next to tailwind.config.js is normal, not drift).
+			if isToolConfigFile(f.Path) {
+				continue
+			}
 			switch f.Lang {
 			case detect.LangTypeScript, detect.LangTSX:
 				ts++

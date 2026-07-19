@@ -158,6 +158,43 @@ func TestToolingFlagsMissingFeedbackLoop(t *testing.T) {
 	}
 }
 
+// TestToolingFindsConfigInMonorepoSubdirectories guards against the mistake
+// this analyzer originally made: only looking at the repo root, and therefore
+// reporting a monorepo with backend/pyproject.toml and frontend/package.json
+// as having no feedback loop at all.
+func TestToolingFindsConfigInMonorepoSubdirectories(t *testing.T) {
+	res := (&toolingAnalyzer{}).Analyze(load(t, "monorepo"))
+	if res.Score != 1 {
+		t.Fatalf("score = %.2f, want 1. Falsely missing: %+v", res.Score, res.Findings)
+	}
+	var nested string
+	for _, n := range res.Notes {
+		if strings.HasPrefix(n, "found outside the repo root:") {
+			nested = n
+		}
+	}
+	for _, want := range []string{"js-package", "ts-config", "py-lint"} {
+		if !strings.Contains(nested, want) {
+			t.Errorf("note should record where %s was found, got %q", want, nested)
+		}
+	}
+}
+
+func TestFindConfigPrefersShallowestPath(t *testing.T) {
+	ctx := load(t, "monorepo")
+	if p, ok := ctx.FindConfig("package.json"); !ok || p != "frontend/package.json" {
+		t.Fatalf("FindConfig(package.json) = %q, %v", p, ok)
+	}
+	// Nothing beyond MaxConfigDepth, and unknown names stay unfound.
+	if p, ok := ctx.FindConfig("nonexistent.toml"); ok {
+		t.Errorf("FindConfig matched a file that does not exist: %q", p)
+	}
+	// Caller order is the preference order.
+	if p, _ := ctx.FindConfig("Makefile", "package.json"); p != "Makefile" {
+		t.Errorf("FindConfig should honour caller order, got %q", p)
+	}
+}
+
 func TestToolingSkipsPythonSignalsForAJSOnlyRepo(t *testing.T) {
 	// The clean fixture has both languages; strip Python to prove the signal
 	// set is language-conditional rather than a fixed checklist.
@@ -190,6 +227,34 @@ func TestTSStrictDetection(t *testing.T) {
 	}
 }
 
+// TestTSStrictFollowsProjectReferences covers the second false positive this
+// analyzer produced in the field: a solution-style tsconfig that only lists
+// references (the default Vite template) was read as "strict is off", even
+// though every referenced config had it on.
+func TestTSStrictFollowsProjectReferences(t *testing.T) {
+	ctx := load(t, "monorepo")
+
+	ok, evidence := tsStrict(ctx, "frontend/tsconfig.json")
+	if !ok {
+		t.Fatal("strict declared in referenced configs must count as strict")
+	}
+	if !strings.Contains(evidence, "tsconfig.app.json") {
+		t.Errorf("evidence should name the config that actually declares strict, got %q", evidence)
+	}
+}
+
+func TestTSStrictRequiresEveryReferencedConfig(t *testing.T) {
+	ctx := load(t, "monorepo")
+	// Simulate one referenced config lacking strict by pointing at a config
+	// whose references cannot all be satisfied.
+	if ok, _ := tsStrict(ctx, "frontend/tsconfig.node.json"); !ok {
+		t.Fatal("a leaf config with strict:true must be reported strict")
+	}
+	if ok, _ := tsStrict(ctx, "frontend/package.json"); ok {
+		t.Error("a file with neither strict, references nor extends must not count as strict")
+	}
+}
+
 func TestHasTOMLSection(t *testing.T) {
 	toml := "[project]\nname = \"x\"\n\n[tool.ruff]\nline-length = 100\n"
 	if sec, ok := hasTOMLSection(toml, "tool.mypy", "tool.ruff"); !ok || sec != "tool.ruff" {
@@ -197,6 +262,36 @@ func TestHasTOMLSection(t *testing.T) {
 	}
 	if _, ok := hasTOMLSection(toml, "tool.black"); ok {
 		t.Error("hasTOMLSection matched a section that is not present")
+	}
+}
+
+// --- consistency -------------------------------------------------------------
+
+// TestConsistencyIgnoresBuildTooling covers the third field false positive:
+// vite.config.ts sitting next to tailwind.config.js was reported as a
+// half-finished TS migration, when it is the normal shape of a Vite project.
+func TestConsistencyIgnoresBuildTooling(t *testing.T) {
+	res := (&consistencyAnalyzer{}).Analyze(load(t, "monorepo"))
+	for _, f := range res.Findings {
+		if strings.Contains(f.Message, "Mixed JS and TS") {
+			t.Errorf("build config files must not count as an application layer: %s", f.Message)
+		}
+	}
+}
+
+func TestIsToolConfigFile(t *testing.T) {
+	for _, p := range []string{
+		"frontend/vite.config.ts", "frontend/tailwind.config.js",
+		"frontend/postcss.config.js", "eslint.config.mjs", "app/.eslintrc.js",
+	} {
+		if !isToolConfigFile(p) {
+			t.Errorf("isToolConfigFile(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"src/config.ts", "src/App.tsx", "app/settings.js"} {
+		if isToolConfigFile(p) {
+			t.Errorf("isToolConfigFile(%q) = true, want false", p)
+		}
 	}
 }
 

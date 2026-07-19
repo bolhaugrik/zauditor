@@ -3,6 +3,7 @@ package analyzers
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 
@@ -69,14 +70,23 @@ func (a *toolingAnalyzer) Analyze(ctx *core.RepoContext) core.DimensionResult {
 	}
 	res.Score = core.Clamp01(got / total)
 
-	var have []string
+	var have, nested []string
 	for _, s := range sigs {
-		if s.ok {
-			have = append(have, s.id)
+		if !s.ok {
+			continue
+		}
+		have = append(have, s.id)
+		// Surface where a config was found when it was not at the repo root:
+		// in a monorepo that is the non-obvious part of the answer.
+		if strings.Contains(s.evidence, "/") {
+			nested = append(nested, s.id+" → "+s.evidence)
 		}
 	}
 	res.Notes = append(res.Notes, fmt.Sprintf("%d/%d feedback signals present: %s",
 		len(have), len(sigs), joinOrNone(have)))
+	if len(nested) > 0 {
+		res.Notes = append(res.Notes, "found outside the repo root: "+strings.Join(nested, ", "))
+	}
 	return res
 }
 
@@ -88,13 +98,13 @@ func projectSignals(ctx *core.RepoContext) []signal {
 		".gitlab-ci.yml", ".circleci/config.yml", "azure-pipelines.yml", "Jenkinsfile",
 		".github/workflows/**/*.yml",
 	)
-	taskPath, hasTask := ctx.HasAny("Makefile", "makefile", "Justfile", "justfile", "Taskfile.yml", "Taskfile.yaml", "noxfile.py", "tox.ini")
+	taskPath, hasTask := ctx.FindConfig("Makefile", "makefile", "Justfile", "justfile", "Taskfile.yml", "Taskfile.yaml", "noxfile.py", "tox.ini")
 	if !hasTask {
-		if _, ok := packageScripts(ctx); ok {
-			taskPath, hasTask = "package.json scripts", true
+		if _, path, ok := packageScripts(ctx); ok {
+			taskPath, hasTask = path+" scripts", true
 		}
 	}
-	precommitPath, hasPrecommit := ctx.HasAny(".pre-commit-config.yaml", ".pre-commit-config.yml", "lefthook.yml")
+	precommitPath, hasPrecommit := ctx.FindConfig(".pre-commit-config.yaml", ".pre-commit-config.yml", "lefthook.yml")
 	if !hasPrecommit {
 		precommitPath, hasPrecommit = firstGlob(ctx, ".husky/*")
 	}
@@ -119,40 +129,42 @@ func projectSignals(ctx *core.RepoContext) []signal {
 }
 
 func pythonSignals(ctx *core.RepoContext) []signal {
-	pyproject := string(ctx.ContentOf("pyproject.toml"))
-	setupCfg := string(ctx.ContentOf("setup.cfg"))
+	pyprojectPath, _ := ctx.FindConfig("pyproject.toml")
+	pyproject := string(ctx.ContentOf(pyprojectPath))
+	setupCfgPath, _ := ctx.FindConfig("setup.cfg")
+	setupCfg := string(ctx.ContentOf(setupCfgPath))
 
-	projPath, hasProj := ctx.HasAny("pyproject.toml", "setup.cfg", "setup.py")
+	projPath, hasProj := ctx.FindConfig("pyproject.toml", "setup.cfg", "setup.py")
 
-	lintPath, hasLint := ctx.HasAny(".ruff.toml", "ruff.toml", ".flake8", ".pylintrc", "pylintrc")
+	lintPath, hasLint := ctx.FindConfig(".ruff.toml", "ruff.toml", ".flake8", ".pylintrc", "pylintrc")
 	if !hasLint {
 		if sec, ok := hasTOMLSection(pyproject, "tool.ruff", "tool.black", "tool.flake8", "tool.pylint", "tool.isort"); ok {
-			lintPath, hasLint = "pyproject.toml ["+sec+"]", true
+			lintPath, hasLint = pyprojectPath+" ["+sec+"]", true
 		} else if strings.Contains(setupCfg, "[flake8]") {
-			lintPath, hasLint = "setup.cfg [flake8]", true
+			lintPath, hasLint = setupCfgPath+" [flake8]", true
 		}
 	}
 
-	typePath, hasType := ctx.HasAny("mypy.ini", ".mypy.ini", "pyrightconfig.json")
+	typePath, hasType := ctx.FindConfig("mypy.ini", ".mypy.ini", "pyrightconfig.json")
 	if !hasType {
 		if sec, ok := hasTOMLSection(pyproject, "tool.mypy", "tool.pyright", "tool.pyre"); ok {
-			typePath, hasType = "pyproject.toml ["+sec+"]", true
+			typePath, hasType = pyprojectPath+" ["+sec+"]", true
 		}
 	}
 
-	testPath, hasTest := ctx.HasAny("pytest.ini", "tox.ini", "conftest.py")
+	testPath, hasTest := ctx.FindConfig("pytest.ini", "tox.ini", "conftest.py")
 	if !hasTest {
 		if sec, ok := hasTOMLSection(pyproject, "tool.pytest.ini_options", "tool.pytest"); ok {
-			testPath, hasTest = "pyproject.toml ["+sec+"]", true
+			testPath, hasTest = pyprojectPath+" ["+sec+"]", true
 		}
 	}
 	if !hasTest {
-		if len(ctx.Glob("**conftest.py")) > 0 {
-			testPath, hasTest = "conftest.py", true
+		if m := ctx.Glob("**conftest.py"); len(m) > 0 {
+			testPath, hasTest = m[0].Path, true
 		}
 	}
 
-	depPath, hasDep := ctx.HasAny("poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock", "requirements.txt", "requirements-dev.txt", "requirements/base.txt")
+	depPath, hasDep := ctx.FindConfig("poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock", "requirements.txt", "requirements-dev.txt")
 
 	return []signal{
 		{
@@ -184,25 +196,25 @@ func pythonSignals(ctx *core.RepoContext) []signal {
 }
 
 func webSignals(ctx *core.RepoContext) []signal {
-	pkgPath, hasPkg := ctx.HasAny("package.json")
-	scripts, _ := packageScripts(ctx)
+	pkgPath, hasPkg := ctx.FindConfig("package.json")
+	scripts, _, _ := packageScripts(ctx)
 
 	hasTS := ctx.HasAnyLang(detect.LangTypeScript, detect.LangTSX)
-	tsconfigPath, hasTSConfig := ctx.HasAny("tsconfig.json", "tsconfig.base.json", "jsconfig.json")
+	tsconfigPath, hasTSConfig := ctx.FindConfig("tsconfig.json", "tsconfig.base.json", "jsconfig.json")
 
-	eslintPath, hasESLint := ctx.HasAny(
+	eslintPath, hasESLint := ctx.FindConfig(
 		"eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts",
 		".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml",
 		"biome.json", "biome.jsonc",
 	)
 	if !hasESLint {
 		if _, ok := packageKey(ctx, "eslintConfig"); ok {
-			eslintPath, hasESLint = "package.json eslintConfig", true
+			eslintPath, hasESLint = pkgPath+" eslintConfig", true
 		}
 	}
 
-	fmtPath, hasFmt := ctx.HasAny(".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs", ".prettierrc.yml", ".prettierrc.yaml", "prettier.config.js", "prettier.config.mjs", "biome.json")
-	lockPath, hasLock := ctx.HasAny("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
+	fmtPath, hasFmt := ctx.FindConfig(".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierrc.cjs", ".prettierrc.yml", ".prettierrc.yaml", "prettier.config.js", "prettier.config.mjs", "biome.json")
+	lockPath, hasLock := ctx.FindConfig("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
 
 	sigs := []signal{
 		{
@@ -266,20 +278,30 @@ type packageJSON struct {
 	Scripts map[string]string `json:"scripts"`
 }
 
-func packageScripts(ctx *core.RepoContext) (map[string]string, bool) {
-	data := ctx.ContentOf("package.json")
+// packageScripts returns the scripts block of the nearest package.json, along
+// with the path it came from so findings can point at the right file.
+func packageScripts(ctx *core.RepoContext) (map[string]string, string, bool) {
+	path, ok := ctx.FindConfig("package.json")
+	if !ok {
+		return nil, "", false
+	}
+	data := ctx.ContentOf(path)
 	if len(data) == 0 {
-		return nil, false
+		return nil, path, false
 	}
 	var pkg packageJSON
 	if err := json.Unmarshal(data, &pkg); err != nil {
-		return nil, false
+		return nil, path, false
 	}
-	return pkg.Scripts, len(pkg.Scripts) > 0
+	return pkg.Scripts, path, len(pkg.Scripts) > 0
 }
 
 func packageKey(ctx *core.RepoContext, key string) (json.RawMessage, bool) {
-	data := ctx.ContentOf("package.json")
+	path, ok := ctx.FindConfig("package.json")
+	if !ok {
+		return nil, false
+	}
+	data := ctx.ContentOf(path)
 	if len(data) == 0 {
 		return nil, false
 	}
@@ -301,29 +323,75 @@ var (
 	jsoncBlockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	tsStrictRE        = regexp.MustCompile(`"strict"\s*:\s*true`)
 	tsExtendsRE       = regexp.MustCompile(`"extends"\s*:`)
+	tsReferenceRE     = regexp.MustCompile(`"path"\s*:\s*"([^"]+)"`)
 )
 
-// tsStrict answers "will the type checker actually complain?". tsconfig is
-// JSONC and may inherit from a base config we cannot resolve without a
-// resolver; an explicit "extends" is accepted as a maybe rather than a no,
-// because false alarms here would train users to ignore the dimension.
+// tsStrict answers "will the type checker actually complain?".
+//
+// Three shapes have to be handled, because getting this wrong produces a false
+// alarm on a perfectly well configured project — and a dimension that cries
+// wolf is one users learn to ignore:
+//
+//   - strict declared directly (the simple case);
+//   - a solution-style tsconfig that only lists "references" (the default Vite
+//     template), where strict lives in the referenced configs;
+//   - "extends" from a base we cannot resolve without a full resolver, which we
+//     accept as a maybe rather than a no.
 func tsStrict(ctx *core.RepoContext, tsconfigPath string) (bool, string) {
-	if tsconfigPath == "" {
+	return tsStrictAt(ctx, tsconfigPath, 0)
+}
+
+const maxTSConfigDepth = 3
+
+func tsStrictAt(ctx *core.RepoContext, tsconfigPath string, depth int) (bool, string) {
+	if tsconfigPath == "" || depth > maxTSConfigDepth {
 		return false, ""
 	}
 	raw := string(ctx.ContentOf(tsconfigPath))
 	if raw == "" {
 		return false, ""
 	}
-	clean := jsoncLineComment.ReplaceAllString(raw, "")
-	clean = jsoncBlockComment.ReplaceAllString(clean, "")
+	clean := jsoncBlockComment.ReplaceAllString(jsoncLineComment.ReplaceAllString(raw, ""), "")
+
 	if tsStrictRE.MatchString(clean) {
 		return true, tsconfigPath + ` "strict": true`
 	}
+
+	// Project references: strict must hold in every referenced config we can
+	// read, since each one compiles part of the app.
+	if refs := tsReferences(ctx, tsconfigPath, clean); len(refs) > 0 {
+		var evidence []string
+		for _, ref := range refs {
+			ok, ev := tsStrictAt(ctx, ref, depth+1)
+			if !ok {
+				return false, ""
+			}
+			evidence = append(evidence, ev)
+		}
+		return true, strings.Join(evidence, ", ")
+	}
+
 	if tsExtendsRE.MatchString(clean) {
 		return true, tsconfigPath + " (inherited via extends — verify manually)"
 	}
 	return false, ""
+}
+
+// tsReferences resolves "references" entries to repo-relative paths that exist
+// in the audited tree. A reference may name a config file or a directory.
+func tsReferences(ctx *core.RepoContext, tsconfigPath, clean string) []string {
+	dir := path.Dir(tsconfigPath)
+	var out []string
+	for _, m := range tsReferenceRE.FindAllStringSubmatch(clean, -1) {
+		target := path.Clean(path.Join(dir, m[1]))
+		if !strings.HasSuffix(target, ".json") {
+			target = path.Join(target, "tsconfig.json")
+		}
+		if ctx.Has(target) {
+			out = append(out, target)
+		}
+	}
+	return out
 }
 
 // hasTOMLSection looks for a [section] header in raw TOML text. The MVP does
