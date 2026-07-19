@@ -9,6 +9,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,7 @@ type flags struct {
 	only        string
 	skip        string
 	configPath  string
+	output      string
 	pluginPath  string
 	maxFindings int
 	verbose     bool
@@ -120,20 +122,33 @@ func run(argv []string) error {
 	ctx := core.NewRepoContext(abs, files, cfg)
 	rep := score.Compute(ctx, chosen)
 
+	out, toFile, err := openOutput(f.output)
+	if err != nil {
+		return err
+	}
 	opts := report.Options{
-		Color:       !f.noColor && report.ColorEnabled(os.Stdout),
+		// Never emit ANSI escapes into a file: a report that is committed or
+		// pasted into a ticket must stay readable.
+		Color:       !f.noColor && !toFile && report.ColorEnabled(os.Stdout),
 		MaxFindings: f.maxFindings,
 		Verbose:     f.verbose,
 	}
 	switch {
 	case f.json:
-		if err := report.JSON(os.Stdout, rep); err != nil {
-			return err
-		}
+		err = report.JSON(out, rep)
 	case f.markdown:
-		report.Markdown(os.Stdout, rep, opts)
+		report.Markdown(out, rep, opts)
 	default:
-		report.Terminal(os.Stdout, rep, opts)
+		report.Terminal(out, rep, opts)
+	}
+	if closeErr := closeOutput(out, toFile); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if toFile {
+		fmt.Fprintf(os.Stderr, "zauditor: wrote %s (score %.1f/100, %s)\n", f.output, rep.Score100, rep.Grade)
 	}
 
 	// CI gate: --min-score is compared against the 0..100 score.
@@ -153,6 +168,8 @@ func parseFlags(argv []string) (*flag.FlagSet, flags, error) {
 	fs.StringVar(&f.only, "only", "", "run only these analyzers (comma-separated IDs)")
 	fs.StringVar(&f.skip, "skip", "", "skip these analyzers (comma-separated IDs)")
 	fs.StringVar(&f.configPath, "config", "", "path to a JSON config overriding weights and thresholds")
+	fs.StringVar(&f.output, "output", "", "write the report to a file instead of stdout")
+	fs.StringVar(&f.output, "o", "", "shorthand for --output")
 	fs.StringVar(&f.pluginPath, "plugin", "", "reserved: path to an external analyzer plugin")
 	fs.IntVar(&f.maxFindings, "max-findings", 25, "cap the printed findings (0 = all)")
 	fs.BoolVar(&f.verbose, "verbose", false, "include info-level findings and analyzer notes")
@@ -164,6 +181,31 @@ func parseFlags(argv []string) (*flag.FlagSet, flags, error) {
 		return nil, f, err
 	}
 	return fs, f, nil
+}
+
+// openOutput returns the report destination. An empty path means stdout, which
+// must not be closed afterwards — hence the second return value.
+func openOutput(path string) (io.Writer, bool, error) {
+	if path == "" {
+		return os.Stdout, false, nil
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, false, fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("write %s: %w", path, err)
+	}
+	return f, true, nil
+}
+
+func closeOutput(w io.Writer, toFile bool) error {
+	if !toFile {
+		return nil
+	}
+	return w.(*os.File).Close()
 }
 
 func listAnalyzers(w *os.File) {
