@@ -326,8 +326,73 @@ func TestWorktreeCopyIsIgnored(t *testing.T) {
 			t.Fatalf("%s should have been ignored: a worktree copy is not source", f.Path)
 		}
 	}
-	if n := len(ctx.SourceFiles()); n != 1 {
-		t.Errorf("source files = %d, want 1 (the copy must not be counted twice)", n)
+	// src/app.py and services/billing.py — the worktree's copy of src/app.py
+	// must not appear as a third.
+	if n := len(ctx.SourceFiles()); n != 2 {
+		t.Errorf("source files = %d, want 2 (the worktree copy must not be counted)", n)
+	}
+}
+
+// --- semantics ---------------------------------------------------------------
+
+func TestSemanticsDetectsDanglingReferences(t *testing.T) {
+	res := (&semanticsAnalyzer{}).Analyze(load(t, "documented"))
+	if !messageContains(res, "no longer exist") {
+		t.Fatalf("a documented path that was removed must be reported: %+v", res.Findings)
+	}
+	// src/app.py exists and src/helpers/legacy.py does not: one of two.
+	if !messageContains(res, "1 of 2 documented paths") {
+		t.Errorf("integrity should be counted over resolvable references only, got %+v", res.Notes)
+	}
+}
+
+// TestSemanticsExcludesForwardLookingDocs guards a deliberate design choice:
+// a plan legitimately names files that do not exist yet, and counting those as
+// drift would punish planning rather than measure reliability.
+func TestSemanticsExcludesForwardLookingDocs(t *testing.T) {
+	res := (&semanticsAnalyzer{}).Analyze(load(t, "documented"))
+	for _, f := range res.Findings {
+		if strings.Contains(f.Path, "TERV") || strings.Contains(f.Message, "future/") {
+			t.Errorf("references in a plan document must not count as drift: %+v", f)
+		}
+	}
+	var noted bool
+	for _, n := range res.Notes {
+		if strings.Contains(n, "forward-looking") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Error("excluded forward-looking references must still be reported in the notes")
+	}
+}
+
+func TestSemanticsReportsUndocumentedAreas(t *testing.T) {
+	res := (&semanticsAnalyzer{}).Analyze(load(t, "documented"))
+	if !messageContains(res, "No documentation references services") {
+		t.Errorf("a code area no document mentions must be reported: %+v", res.Findings)
+	}
+	if messageContains(res, "No documentation references src") {
+		t.Error("src is referenced by docs/INDEXED.md and must count as covered")
+	}
+}
+
+func TestSemanticsSkipsWithoutDocs(t *testing.T) {
+	res := (&semanticsAnalyzer{}).Analyze(load(t, "messy"))
+	if !res.Skipped {
+		t.Fatal("absence of documentation is the docs dimension's finding, not this one's")
+	}
+}
+
+func TestSemanticsIntegrityThresholdIsConfigurable(t *testing.T) {
+	ctx := load(t, "documented")
+	ctx.Config.DocRefIntegrityMin = 0.4 // 50% integrity now passes
+
+	res := (&semanticsAnalyzer{}).Analyze(ctx)
+	for _, f := range res.Findings {
+		if strings.Contains(f.Message, "no longer exist") && f.Severity != core.SeverityInfo {
+			t.Errorf("below the configured threshold the drift finding should soften to info, got %v", f.Severity)
+		}
 	}
 }
 

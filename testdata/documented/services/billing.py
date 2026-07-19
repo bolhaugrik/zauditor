@@ -1,0 +1,3 @@
+﻿def charge():
+    return True
+

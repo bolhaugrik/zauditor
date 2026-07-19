@@ -43,6 +43,10 @@ type Config struct {
 	DocsStaleDays int `json:"docs_stale_days"`
 	// MinTestRatio is the test-file / source-file ratio considered healthy.
 	MinTestRatio float64 `json:"min_test_ratio"`
+	// DocRefIntegrityMin is the share of documented paths that must still
+	// resolve. Documentation is only load-bearing while it is accurate: below
+	// this ratio the index starts sending readers to the wrong place.
+	DocRefIntegrityMin float64 `json:"doc_ref_integrity_min"`
 	// AgentContext is the line budget for instruction files that are loaded
 	// into every single request. This is a permanent tax on every task the
 	// agent performs, so it is held to a tighter limit than ordinary docs.
@@ -70,15 +74,16 @@ func Default() *Config {
 			detect.LangJSX:  {Warn: 300, Critical: 600},
 			detect.LangHTML: {Warn: 600, Critical: 1200},
 		},
-		SizeDefault:      SizeThreshold{Warn: 500, Critical: 1000},
-		DirWidthWarn:     25,
-		CatchAllNames:    []string{"utils", "util", "utilities", "helpers", "helper", "common", "commons", "misc", "shared", "core", "base", "stuff"},
-		CatchAllMinLines: 150,
-		DocsStaleDays:    90,
-		MinTestRatio:     0.2,
-		AgentContext:     SizeThreshold{Warn: 300, Critical: 800},
-		AgentStubChars:   80,
-		Analyzers:        map[string]AnalyzerConfig{},
+		SizeDefault:        SizeThreshold{Warn: 500, Critical: 1000},
+		DirWidthWarn:       25,
+		CatchAllNames:      []string{"utils", "util", "utilities", "helpers", "helper", "common", "commons", "misc", "shared", "core", "base", "stuff"},
+		CatchAllMinLines:   150,
+		DocsStaleDays:      90,
+		MinTestRatio:       0.2,
+		DocRefIntegrityMin: 0.9,
+		AgentContext:       SizeThreshold{Warn: 300, Critical: 800},
+		AgentStubChars:     80,
+		Analyzers:          map[string]AnalyzerConfig{},
 	}
 }
 
