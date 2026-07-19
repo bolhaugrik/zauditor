@@ -23,6 +23,15 @@ var DefaultIgnores = []string{
 	".terraform", ".gradle", "target",
 }
 
+// DefaultIgnorePatterns are gitignore-style rules that cannot be expressed as
+// a single directory name. Agent tooling likes to keep a full second copy of
+// the repo under a dotdir; counted as source it doubles every metric.
+var DefaultIgnorePatterns = []string{
+	".claude/worktrees/",
+	".worktrees/",
+	".git/worktrees/",
+}
+
 type pattern struct {
 	re      *regexp.Regexp
 	negate  bool
@@ -40,6 +49,9 @@ func NewMatcher() *Matcher {
 	m := &Matcher{defaults: make(map[string]bool, len(DefaultIgnores))}
 	for _, d := range DefaultIgnores {
 		m.defaults[d] = true
+	}
+	for _, p := range DefaultIgnorePatterns {
+		m.AddPattern(p)
 	}
 	return m
 }

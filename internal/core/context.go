@@ -47,12 +47,13 @@ type RepoContext struct {
 	// docs freshness heuristic.
 	NewestCodeMod time.Time
 
-	byPath  map[string]*FileInfo
-	byBase  map[string][]*FileInfo
-	byLang  map[detect.Language][]*FileInfo
-	dirs    map[string][]*FileInfo
-	mu      sync.Mutex
-	content map[string][]byte
+	byPath      map[string]*FileInfo
+	byBase      map[string][]*FileInfo
+	byBaseLower map[string][]*FileInfo
+	byLang      map[detect.Language][]*FileInfo
+	dirs        map[string][]*FileInfo
+	mu          sync.Mutex
+	content     map[string][]byte
 }
 
 // NewRepoContext assembles the shared model from a walked file list.
@@ -61,20 +62,24 @@ func NewRepoContext(root string, files []FileInfo, cfg *config.Config) *RepoCont
 		cfg = config.Default()
 	}
 	c := &RepoContext{
-		Root:      root,
-		Files:     files,
-		LangStats: map[detect.Language]LangStat{},
-		Config:    cfg,
-		byPath:    make(map[string]*FileInfo, len(files)),
-		byBase:    map[string][]*FileInfo{},
-		byLang:    map[detect.Language][]*FileInfo{},
-		dirs:      map[string][]*FileInfo{},
-		content:   map[string][]byte{},
+		Root:        root,
+		Files:       files,
+		LangStats:   map[detect.Language]LangStat{},
+		Config:      cfg,
+		byPath:      make(map[string]*FileInfo, len(files)),
+		byBase:      map[string][]*FileInfo{},
+		byBaseLower: map[string][]*FileInfo{},
+		byLang:      map[detect.Language][]*FileInfo{},
+		dirs:        map[string][]*FileInfo{},
+		content:     map[string][]byte{},
 	}
 	for i := range c.Files {
 		f := &c.Files[i]
 		c.byPath[f.Path] = f
-		c.byBase[path.Base(f.Path)] = append(c.byBase[path.Base(f.Path)], f)
+		base := path.Base(f.Path)
+		c.byBase[base] = append(c.byBase[base], f)
+		lower := strings.ToLower(base)
+		c.byBaseLower[lower] = append(c.byBaseLower[lower], f)
 		c.byLang[f.Lang] = append(c.byLang[f.Lang], f)
 		c.dirs[path.Dir(f.Path)] = append(c.dirs[path.Dir(f.Path)], f)
 
@@ -126,10 +131,38 @@ const MaxConfigDepth = 2
 // shallowest path wins, ties broken lexicographically, so the result is
 // deterministic.
 func (c *RepoContext) FindConfig(names ...string) (string, bool) {
+	return c.find(false, names...)
+}
+
+// FindFold is FindConfig with case-insensitive basename matching. Tool configs
+// have canonical spellings, but documentation does not: README.md, readme.md
+// and Readme.md are the same file to a reader, and treating them differently
+// would make the docs dimension a spelling quiz.
+func (c *RepoContext) FindFold(names ...string) (string, bool) {
+	return c.find(true, names...)
+}
+
+// FindAllFold returns every file whose basename matches one of the names,
+// case-insensitively, at any depth. Path-ordered.
+func (c *RepoContext) FindAllFold(names ...string) []*FileInfo {
+	var out []*FileInfo
 	for _, name := range names {
+		out = append(out, c.byBaseLower[strings.ToLower(name)]...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+func (c *RepoContext) find(fold bool, names ...string) (string, bool) {
+	for _, name := range names {
+		index := c.byBase
+		if fold {
+			index = c.byBaseLower
+			name = strings.ToLower(name)
+		}
 		best := ""
 		bestDepth := MaxConfigDepth + 1
-		for _, f := range c.byBase[name] {
+		for _, f := range index[name] {
 			d := strings.Count(f.Path, "/")
 			if d > MaxConfigDepth {
 				continue

@@ -265,6 +265,72 @@ func TestHasTOMLSection(t *testing.T) {
 	}
 }
 
+// --- docs --------------------------------------------------------------------
+
+// TestDocsRecognisesNonCanonicalDocumentation covers the fourth field false
+// positive: a repo with 211 documents and a full .agents rule set scored 11%,
+// because none of the files happened to be named ARCHITECTURE.md at the root.
+func TestDocsRecognisesNonCanonicalDocumentation(t *testing.T) {
+	res := (&docsAnalyzer{}).Analyze(load(t, "documented"))
+
+	for _, missing := range []string{"README", "architecture overview", "agent instructions"} {
+		if messageContains(res, "Missing: "+missing) {
+			t.Errorf("%q is present in the fixture but was reported missing", missing)
+		}
+	}
+	// Readme.md (not README.md), docs/LOGIC_FLOW.md (not ARCHITECTURE.md) and
+	// .agents/**/*.md (not CLAUDE.md) must all count.
+	if res.Score < 0.7 {
+		t.Errorf("score = %.2f; a documented repo must not score like an undocumented one: %+v", res.Score, res.Findings)
+	}
+}
+
+// TestDocsFlagsUnindexedCorpus checks the opposite failure mode: a pile of
+// documents with no entry point is a search problem, not context.
+func TestDocsFlagsUnindexedCorpus(t *testing.T) {
+	res := (&docsAnalyzer{}).Analyze(load(t, "documented"))
+	if !messageContains(res, "no index or entry point") {
+		t.Errorf("31 docs with no docs/README.md must be flagged, got %+v", res.Findings)
+	}
+	if res2 := (&docsAnalyzer{}).Analyze(load(t, "clean")); messageContains(res2, "no index or entry point") {
+		t.Error("a repo with a handful of docs must not be asked for an index")
+	}
+}
+
+func TestFindArchitectureDocAcceptsAliases(t *testing.T) {
+	ctx := load(t, "documented")
+	p, ok := findArchitectureDoc(ctx)
+	if !ok || p != "docs/LOGIC_FLOW.md" {
+		t.Fatalf("findArchitectureDoc = %q, %v; want docs/LOGIC_FLOW.md", p, ok)
+	}
+}
+
+func TestFindAgentInstructionsAcceptsDirectories(t *testing.T) {
+	ctx := load(t, "documented")
+	p, ok := findAgentInstructions(ctx)
+	if !ok || !strings.HasPrefix(p, ".agents/") {
+		t.Fatalf("findAgentInstructions = %q, %v; want the .agents directory", p, ok)
+	}
+	if _, ok := findAgentInstructions(load(t, "messy")); ok {
+		t.Error("a repo with no agent instructions must not report any")
+	}
+}
+
+// TestWorktreeCopyIsIgnored guards the fifth field problem: agent tooling keeps
+// a full second copy of the repo under .claude/worktrees, which counted as
+// source doubled every metric.
+func TestWorktreeCopyIsIgnored(t *testing.T) {
+	ctx := load(t, "documented")
+	for _, f := range ctx.Files {
+		if strings.Contains(f.Path, "worktrees") {
+			t.Fatalf("%s should have been ignored: a worktree copy is not source", f.Path)
+		}
+	}
+	if n := len(ctx.SourceFiles()); n != 1 {
+		t.Errorf("source files = %d, want 1 (the copy must not be counted twice)", n)
+	}
+}
+
 // --- consistency -------------------------------------------------------------
 
 // TestConsistencyIgnoresBuildTooling covers the third field false positive:
