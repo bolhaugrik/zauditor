@@ -1,0 +1,4 @@
+﻿# cleanapp
+
+Run `make test`.
+

@@ -1,0 +1,9 @@
+﻿{
+  "name": "cleanapp",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "lint": "eslint .",
+    "test": "vitest run"
+  }
+}
