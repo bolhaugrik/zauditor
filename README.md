@@ -15,6 +15,7 @@ structural conditions that make a repo cheap or expensive to change:
 | **tests** | Is there a safety net at all? |
 | **size** | How much of the code lives in files too large to hold in one pass? |
 | **docs** | Does the repo explain itself — including to an agent? |
+| **agentfiles** | Are the files written *for* an LLM worth loading? (budget, broken commands, stubs) |
 | **noise** | How much of the loaded context is not load-bearing? |
 | **consistency** | Does the repo teach *one* way of doing things? |
 
@@ -230,14 +231,44 @@ already speaks a `Language` vocabulary, and parsed trees would be cached in
 `RepoContext` next to file content. Analyzers that ask for an AST would opt in;
 the ones that do not keep working unchanged.
 
+## The agentfiles dimension
+
+Instruction files written for an LLM — `CLAUDE.md`, `AGENTS.md`, `.cursorrules`,
+`.agents/rules/*.md` — are the highest-leverage bytes in a repository, and they
+fail differently from ordinary documentation. Nobody acts on a stale README
+sentence; an agent acts on every line of an instruction file. So this dimension
+does not ask whether they exist (that is the docs dimension) but whether they
+are worth loading:
+
+- **Context budget.** Always-on files are paid for on *every* task, before a
+  single line of code is read. Their combined size is held to a tighter limit
+  than ordinary docs (`agent_context` in the config).
+- **Commands that do not exist.** `make verify` in CLAUDE.md is verified
+  against the Makefile's targets, `npm run typecheck` against package.json's
+  scripts. This is the most damaging defect available: the agent will run it,
+  it will fail, and the agent will go looking for the fault in your code.
+- **Paths that do not exist.** A moved path is worse than no path.
+- **Stubs.** An empty rule file still gets listed to the agent, which must open
+  it to discover it says nothing. Measured in characters, not lines: a two-line
+  rule can be a complete instruction.
+- **Empty frontmatter descriptions.** The description is the routing key that
+  decides whether the file is loaded at all.
+- **Competing authorities.** `CLAUDE.md` and `AGENTS.md` side by side drift,
+  and the agent cannot tell which one wins.
+
+Only code spans (backticked text) are examined for commands and paths, and a
+path is only judged when its first segment is a real directory in this repo —
+precision matters more than recall here, because a dimension that cries wolf
+about instruction files is one users switch off.
+
 ## Status
 
-Fully implemented: **size**, **tooling**.
+Fully implemented: **size**, **tooling**, **docs**, **agentfiles**.
 
 Skeletons — registered, running, scoring, with the intended heuristics marked by
-`TODO` at the point where they belong: **docs**, **tests**, **noise**,
-**consistency**. They are deliberately visible in the report (each carries a
-"skeleton analyzer" note under `--verbose`) rather than hidden behind a flag.
+`TODO` at the point where they belong: **tests**, **noise**, **consistency**.
+They are deliberately visible in the report (each carries a "skeleton analyzer"
+note under `--verbose`) rather than hidden behind a flag.
 
 ## Tests
 

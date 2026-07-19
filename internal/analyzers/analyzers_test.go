@@ -331,6 +331,90 @@ func TestWorktreeCopyIsIgnored(t *testing.T) {
 	}
 }
 
+// --- agentfiles --------------------------------------------------------------
+
+func TestAgentFilesFlagsBrokenCommands(t *testing.T) {
+	res := (&agentFilesAnalyzer{}).Analyze(load(t, "agentrepo"))
+
+	// `make test` and `npm run lint` exist; `make verify` and
+	// `npm run typecheck` do not.
+	if !messageContains(res, "no target \"verify\"") {
+		t.Errorf("a make target that does not exist must be flagged: %+v", res.Findings)
+	}
+	if !messageContains(res, "no script \"typecheck\"") {
+		t.Error("an npm script that does not exist must be flagged")
+	}
+	for _, ok := range []string{"make test", "npm run lint"} {
+		for _, f := range res.Findings {
+			if strings.Contains(f.Message, "`"+ok+"`") {
+				t.Errorf("%q exists and must not be flagged: %s", ok, f.Message)
+			}
+		}
+	}
+	// A broken command is critical: the agent will actually run it.
+	var crit bool
+	for _, f := range res.Findings {
+		if f.Severity == core.SeverityCritical {
+			crit = true
+		}
+	}
+	if !crit {
+		t.Error("a command the agent is told to run but which does not exist must be critical")
+	}
+}
+
+func TestAgentFilesFlagsBrokenPaths(t *testing.T) {
+	res := (&agentFilesAnalyzer{}).Analyze(load(t, "agentrepo"))
+	if !messageContains(res, "src/helpers/legacy.py") {
+		t.Errorf("a referenced path that does not exist must be flagged: %+v", res.Findings)
+	}
+	if messageContains(res, "`src/app.py`, which does not exist") {
+		t.Error("src/app.py exists and must not be flagged")
+	}
+}
+
+func TestAgentFilesFlagsStubsAndEmptyDescription(t *testing.T) {
+	res := (&agentFilesAnalyzer{}).Analyze(load(t, "agentrepo"))
+	if !messageContains(res, "Stub instruction file") {
+		t.Errorf("an instruction file with no body must be flagged: %+v", res.Findings)
+	}
+	if !messageContains(res, "empty `description`") {
+		t.Error("frontmatter with an empty description must be flagged")
+	}
+	// Field false positive: a two-line rule can be a complete instruction.
+	// Stub-ness is about how much is said, not how many lines it took.
+	for _, f := range res.Findings {
+		if strings.Contains(f.Path, "short-but-real") {
+			t.Errorf("a short but complete rule must not be called a stub: %s", f.Message)
+		}
+	}
+}
+
+func TestAgentFilesFlagsCompetingRootFiles(t *testing.T) {
+	res := (&agentFilesAnalyzer{}).Analyze(load(t, "agentrepo"))
+	if !messageContains(res, "Multiple root instruction files") {
+		t.Error("CLAUDE.md and AGENTS.md side by side must be reported")
+	}
+}
+
+func TestAgentFilesSkipsRepoWithoutInstructions(t *testing.T) {
+	res := (&agentFilesAnalyzer{}).Analyze(load(t, "messy"))
+	if !res.Skipped {
+		t.Fatal("absence is the docs dimension's finding; this one must skip to avoid double-counting")
+	}
+}
+
+func TestAgentFilesRespectsContextBudget(t *testing.T) {
+	ctx := load(t, "agentrepo")
+	ctx.Config.AgentContext.Warn = 1
+	ctx.Config.AgentContext.Critical = 2
+
+	res := (&agentFilesAnalyzer{}).Analyze(ctx)
+	if !messageContains(res, "Always-loaded instructions total") {
+		t.Errorf("lowering the budget must produce a finding: %+v", res.Findings)
+	}
+}
+
 // --- consistency -------------------------------------------------------------
 
 // TestConsistencyIgnoresBuildTooling covers the third field false positive:

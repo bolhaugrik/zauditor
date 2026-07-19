@@ -43,6 +43,15 @@ type Config struct {
 	DocsStaleDays int `json:"docs_stale_days"`
 	// MinTestRatio is the test-file / source-file ratio considered healthy.
 	MinTestRatio float64 `json:"min_test_ratio"`
+	// AgentContext is the line budget for instruction files that are loaded
+	// into every single request. This is a permanent tax on every task the
+	// agent performs, so it is held to a tighter limit than ordinary docs.
+	AgentContext SizeThreshold `json:"agent_context"`
+	// AgentStubChars is the minimum amount of body text an instruction file
+	// must carry to count as written rather than started. Measured in
+	// characters rather than lines: a two-line rule can be a complete
+	// instruction, and an eight-line one can say nothing.
+	AgentStubChars int `json:"agent_stub_chars"`
 	// Analyzers holds per-analyzer overrides, keyed by analyzer ID.
 	Analyzers map[string]AnalyzerConfig `json:"analyzers"`
 }
@@ -67,6 +76,8 @@ func Default() *Config {
 		CatchAllMinLines: 150,
 		DocsStaleDays:    90,
 		MinTestRatio:     0.2,
+		AgentContext:     SizeThreshold{Warn: 300, Critical: 800},
+		AgentStubChars:   80,
 		Analyzers:        map[string]AnalyzerConfig{},
 	}
 }
